@@ -23,6 +23,8 @@ jobs:
           done
           echo "ALL PARTS OK"
       - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create model-qwen35-4b --title "Qwen3.5-4B Q4_K_M 7z parts" --notes "108 7z parts for ollama import (Netfree bypass)" || true
           gh release upload model-qwen35-4b 'Qwen3.5-4B-Q4_K_M.7z.*' --clobber
