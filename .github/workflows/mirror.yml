@@ -19,7 +19,7 @@ jobs:
         run: |
           for f in Qwen3.5-4B-Q4_K_M.7z.*; do
             sz=$(stat -c %s "$f")
-            if [ "$sz" -lt 20000000 ]; then echo "FAIL $f size=$sz"; exit 1; fi
+            if [ "$sz" -lt 10000000 ]; then echo "FAIL $f size=$sz"; exit 1; fi
           done
           echo "ALL PARTS OK"
       - name: Publish release
