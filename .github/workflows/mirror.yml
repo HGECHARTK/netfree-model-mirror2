@@ -1,0 +1,28 @@
+name: mirror
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download 108 parts
+        run: |
+          for n in $(seq 1 108); do
+            i=$(printf "%03d" $n)
+            curl -sL --retry 5 -o "Qwen3.5-4B-Q4_K_M.7z.$i" "https://raw.githubusercontent.com/pilijamyuan/Qwen3.5-4B-GGUF/main/Qwen3.5-4B-Q4_K_M.7z.$i" || exit 1
+          done
+      - name: Verify sizes
+        run: |
+          for f in Qwen3.5-4B-Q4_K_M.7z.*; do
+            sz=$(stat -c %s "$f")
+            if [ "$sz" -lt 20000000 ]; then echo "FAIL $f size=$sz"; exit 1; fi
+          done
+          echo "ALL PARTS OK"
+      - name: Publish release
+        run: |
+          gh release create model-qwen35-4b --title "Qwen3.5-4B Q4_K_M 7z parts" --notes "108 7z parts for ollama import (Netfree bypass)" || true
+          gh release upload model-qwen35-4b 'Qwen3.5-4B-Q4_K_M.7z.*' --clobber
