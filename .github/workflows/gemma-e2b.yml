@@ -21,33 +21,21 @@ jobs:
           curl -s -w "HTTP:%{http_code}\n" -o /tmp/s1.json "https://huggingface.co/api/models?search=gemma-4-E2B-it-GGUF&limit=100"
           echo "--- search 2 ---"
           curl -s -w "HTTP:%{http_code}\n" -o /tmp/s2.json "https://huggingface.co/api/models?search=gemma%204%20e2b&limit=100"
-          echo "--- all gguf-ish hits, sorted by downloads ---"
+          echo "--- candidate repos (by downloads) ---"
           jq -s '[ .[0], .[1] ] | map(if type=="array" then . else [] end) | add | map(select(((.id|ascii_downcase)|contains("e2b")) and ((.id|ascii_downcase)|contains("gguf")))) | sort_by(.downloads) | reverse | .[0:20][] | "\(.downloads) \(.id)"' /tmp/s1.json /tmp/s2.json
           jq -s '[ .[0], .[1] ] | map(if type=="array" then . else [] end) | add | map(select(((.id|ascii_downcase)|contains("e2b")) and ((.id|ascii_downcase)|contains("gguf")))) | sort_by(.downloads) | reverse' /tmp/s1.json /tmp/s2.json > /tmp/cands.json
-          if [ "$(jq -r 'length' /tmp/cands.json)" = "0" ]; then
-            echo '{"roelfrenkema/gemma-4-E2B-it.Q4_K_M-med.gguf":0}' | jq 'to_entries | map({id:.key,downloads:.value})' > /tmp/cands.json
-          fi
           REPO=$(jq -r 'map({id:.id,d:(if(.downloads==null) then 0 else .downloads end),s:((if(.id|ascii_downcase|contains("gemma-4-e2b")) then 0 else 1 end)+(if(.id|ascii_downcase|contains("q4")) then 0 else 1 end))}) | sort_by([.s,(-.d)]) | .[0].id' /tmp/cands.json)
           echo "using repo: $REPO"
-          curl -s -w "HTTP:%{http_code}\n" -o /tmp/model.json "https://huggingface.co/api/models/$REPO"
-          if ! grep -q '"siblings"' /tmp/model.json; then
-            echo "REPO_NOT_FOUND: $REPO"
-            head -c 300 /tmp/model.json
-            echo ""
+          if [ -z "$REPO" ] || [ "$REPO" = "null" ]; then
+            echo "NO_REPO_FOUND"
             exit 1
           fi
-          echo "--- siblings (first 40) ---"
-          jq -r '.siblings[].rfilename' /tmp/model.json | head -40
-          TARGET=$(jq -r '.siblings[].rfilename' /tmp/model.json | grep -Ei '\.gguf$' | grep -Ev '/' | head -1)
-          if [ -z "$TARGET" ]; then
-            for want in q4_k_m q4_k_s q8_0 q5_k_m f16 bf16; do
-              TARGET=$(jq -r '.siblings[].rfilename' /tmp/model.json | grep -Ei '\.gguf$' | grep -Ev '/|e4b|27b|35b|72b' | grep -Ei "$want" | head -1)
-              if [ -n "$TARGET" ]; then break; fi
-            done
-          fi
-          if [ -z "$TARGET" ]; then
+          curl -s -w "HTTP:%{http_code}\n" -o /tmp/tree.json "https://huggingface.co/api/models/$REPO/tree/main?recursive=true&expand=true"
+          echo "--- files by size (top 15) ---"
+          jq -r '[ .[] | select(.type=="file") | {path:.path,size:(.size//0)} ] | sort_by(.size) | reverse | .[0:15][] | "\(.size) \(.path)"' /tmp/tree.json
+          TARGET=$(jq -r '[ .[] | select(.type=="file") | select((.path|test("(?i)\\.gguf$"))) | select((.path|test("(?i)mmproj|mtp|vision|encoder|projector|tokenizer|imatrix|audio|aux"))|not) | {path:.path,size:(.size//0)} ] | sort_by(.size) | reverse | .[0].path' /tmp/tree.json)
+          if [ -z "$TARGET" ] || [ "$TARGET" = "null" ]; then
             echo "NO_TARGET_FOUND"
-            jq -r '.siblings[].rfilename' /tmp/model.json | head -40
             exit 1
           fi
           echo "target: $TARGET"
