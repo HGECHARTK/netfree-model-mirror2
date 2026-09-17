@@ -1,11 +1,6 @@
 name: mirror-gemma-e2b
 on:
   workflow_dispatch:
-    inputs:
-      quant:
-        description: 'Quantization (Q4_K_M, Q8_0, ...)'
-        required: false
-        default: 'Q4_K_M'
 
 permissions:
   contents: write
@@ -14,91 +9,66 @@ jobs:
   upload:
     runs-on: ubuntu-latest
     steps:
-      - name: Install 7zip
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+      - name: Install 7-Zip
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full
 
-      - name: Discover HF repo
+      - name: Resolve GGUF repo and file on HuggingFace
         id: discover
         run: |
-          echo 'Searching HF API for Gemma 4 E2B GGUF repos...'
-          SEARCH=$(curl -s "https://huggingface.co/api/models?search=gemma-4-E2B-it-GGUF&limit=50")
-          echo "$SEARCH" | python3 -c "
-import json,sys
-data=json.load(sys.stdin)
-for m in data:
-    print(m['id'], m.get('downloads',0))
-        "
+          curl -s "https://huggingface.co/api/models?search=gemma-4-E2B-it-GGUF&limit=100" > /tmp/s1.json
+          curl -s "https://huggingface.co/api/models?search=gemma-4-E2B&limit=100" > /tmp/s2.json
+          jq -n -s '[ .[0][], .[1][] ] | map(select(((.id|ascii_downcase)|contains("e2b")) and ((.id|ascii_downcase)|contains("gguf")))) | sort_by(.downloads) | reverse' /tmp/s1.json /tmp/s2.json > /tmp/cands.json
+          if [ "$(cat /tmp/cands.json)" = "[]" ]; then
+            echo '{"ggml-org/gemma-4-E2B-it-GGUF":0,"unsloth/gemma-4-E2B-it-GGUF":0,"google/gemma-4-E2B-it-GGUF":0}' | jq 'to_entries | map({id:.key,downloads:.value})' > /tmp/cands.json
+          fi
+          echo "=== candidates ==="
+          jq -r '.[].id' /tmp/cands.json | head -20
+          REPO=$(jq -r '.[0].id' /tmp/cands.json)
+          echo "using repo: $REPO"
+          curl -s "https://huggingface.co/api/models/$REPO" > /tmp/model.json
+          if ! grep -q '"siblings"' /tmp/model.json; then
+            echo "REPO_NOT_FOUND: $REPO"
+            exit 1
+          fi
+          TARGET=$(jq -r '.siblings[].rfilename' /tmp/model.json | grep -Ei '\.gguf$' | grep -Ei 'e2b' | grep -Ei 'q4_k_m' | head -1)
+          if [ -z "$TARGET" ]; then
+            TARGET=$(jq -r '.siblings[].rfilename' /tmp/model.json | grep -Ei '\.gguf$' | grep -Ei 'q4_k_m' | grep -Ev 'e4b|27b|35b|72b' | head -1)
+          fi
+          if [ -z "$TARGET" ]; then
+            TARGET=$(jq -r '.siblings[].rfilename' /tmp/model.json | grep -Ei '\.gguf$' | grep -Ei 'e2b' | head -1)
+          fi
+          if [ -z "$TARGET" ]; then
+            echo "NO_TARGET_FOUND"
+            jq -r '.siblings[].rfilename' /tmp/model.json | head -30
+            exit 1
+          fi
+          echo "target: $TARGET"
+          echo "repo=$REPO" >> $GITHUB_OUTPUT
+          echo "archive=$TARGET" >> $GITHUB_OUTPUT
 
       - name: Download GGUF
-        id: download
+        env:
+          REPO: ${{ steps.discover.outputs.repo }}
+          TARGET: ${{ steps.discover.outputs.archive }}
         run: |
-          QUANT="${{ github.event.inputs.quant }}"
-          echo "Quant: $QUANT"
-          # Candidate repos, in priority order
-          CANDIDATES="ggml-org/gemma-4-E2B-it-GGUF unsloth/gemma-4-E2B-it-GGUF google/gemma-4-E2B-it-GGUF"
-          DL=""
-          FNAME=""
-          for repo in $CANDIDATES; do
-            echo "Trying $repo ..."
-            FILES=$(curl -s "https://huggingface.co/api/models/$repo")
-            echo "$FILES" | python3 - <<'PY'
-import json,sys,os
-repo=os.environ.get('REPO','')
-quant=os.environ.get('QUANT','Q4_K_M')
-try:
-    data=json.load(sys.stdin)
-except Exception as e:
-    sys.exit('no-json')
-siblings=data.get('siblings') or []
-matches=[s['rfilename'] for s in siblings if s['rfilename'].endswith('.gguf') and quant in s['rfilename'] and 'E4B' not in s['rfilename'] and 'E2B' not in s['rfilename']]
-PY
-          done
-          echo "Discovery incomplete - fetching via API"
-
-      - name: Resolve file and download
-        run: |
-          QUANT="${{ github.event.inputs.quant }}"
-          REPO="ggml-org/gemma-4-E2B-it-GGUF"
-          echo "Querying $REPO"
-          JSON=$(curl -s "https://huggingface.co/api/models/$REPO")
-          echo "$JSON" > /tmp/hf.json
-          cat /tmp/hf.json | python3 -c "
-import json,sys
-d=json.load(open('/tmp/hf.json'))
-quant='${QUANT}'
-files=[s['rfilename'] for s in d.get('siblings',[]) if s['rfilename'].endswith('.gguf')]
-print('FILES:')
-for f in files: print('  ',f)
-target=[f for f in files if quant in f]
-print('TARGET:')
-for f in target: print('  ',f)
-if not target:
-    print('NO_MATCH_QUANT', quant)
-    print('USING_FIRST', files[0] if files else '')
-    open('/tmp/target.txt','w').write(files[0] if files else '')
-else:
-    open('/tmp/target.txt','w').write(target[0])
-          "
-          TARGET=$(cat /tmp/target.txt)
-          echo "Downloading $TARGET from $REPO"
-          curl -sL --retry 5 -o model.gguf "https://huggingface.co/$REPO/resolve/main/$TARGET?download=true" -w "HTTP %{http_code} size=%{size_download}\n"
+          echo "Downloading $TARGET from $REPO ..."
+          curl -sL --retry 8 --retry-all-errors -o model.gguf "https://huggingface.co/$REPO/resolve/main/$TARGET?download=true"
           ls -la model.gguf
-          echo "archive_name=$(basename $TARGET)" >> $GITHUB_OUTPUT
-          echo "repo=$REPO" >> $GITHUB_OUTPUT
 
-      - name: Split into 7z parts
+      - name: Split into 7z parts (24MB)
         run: |
           mkdir -p parts
-          7z a -v24m -mx=1 "parts/gemma-e2b.7z" model.gguf >/dev/null
-          ls -la parts | head -50
+          7z a -bso0 -bsp0 -v24m -mx=1 "parts/gemma-e2b.7z" model.gguf
+          echo "PARTS:"
+          ls -la parts
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ARCH="${{ steps.download.outputs.archive_name }}"
-          echo "Publishing parts for $ARCH"
           N=$(ls parts | wc -l)
-          gh release create gemma-4-e2b --repo HGECHARTK/netfree-model-mirror2 --title "Gemma 4 E2B GGUF ($N parts)" --notes "Auto-mirror of $ARCH from HuggingFace (Netfree bypass)" || true
+          gh release create gemma-4-e2b --repo HGECHARTK/netfree-model-mirror2 --title "Gemma 4 E2B GGUF ($N parts)" --notes "Auto-mirror from HuggingFace (Netfree bypass)" || true
           gh release upload gemma-4-e2b --repo HGECHARTK/netfree-model-mirror2 parts/* --clobber
-          echo "https://github.com/HGECHARTK/netfree-model-mirror2/releases/tag/gemma-4-e2b"
+          echo "DONE: https://github.com/HGECHARTK/netfree-model-mirror2/releases/tag/gemma-4-e2b"
