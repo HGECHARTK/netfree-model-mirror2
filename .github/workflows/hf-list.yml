@@ -1,0 +1,30 @@
+name: hf-list
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "מחרוזת חיפוש במאגרי HuggingFace"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  q:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Search
+        env:
+          Q: ${{ inputs.query }}
+        run: |
+          set -e
+          curl -s -G --data-urlencode "search=$Q" --data "limit=100" "https://huggingface.co/api/models" -o s.json
+          jq -r '.[] | "\(.downloads // 0) \(.id)"' s.json | sort -rn | head -50 > out.txt
+          cat out.txt
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create hf-list --repo "$GITHUB_REPOSITORY" --title "hf-list" --notes "search results" 2>/dev/null || true
+          gh release upload hf-list --repo "$GITHUB_REPOSITORY" out.txt --clobber
