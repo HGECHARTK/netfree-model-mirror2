@@ -42,11 +42,14 @@ jobs:
           else
             curl -s -o tree.json "https://huggingface.co/api/models/$HF_REPO/tree/main?recursive=true&expand=true"
             TARGET=$(jq -r --arg h "$(echo "$HINT" | tr 'A-Z' 'a-z')" '
+              def is_part: test("-0+[1-9][0-9]*-of-[0-9]+\\.gguf$");
+              def is_first: test("-0+1-of-[0-9]+\\.gguf$");
               [ .[] | select(.type=="file")
                 | select((.path|test("(?i)\\.gguf$")))
                 | select((.path|test("(?i)mmproj|mtp|vision|encoder|projector|tokenizer|imatrix|audio|aux"))|not)
-                | {path:.path,size:(.size//0),hit:(if ((.path|ascii_downcase)|contains($h)) then 0 else 1 end)}
-              ] | sort_by([.hit, .size]) | .[0].path' tree.json)
+                | {path:.path,size:(.size//0),hit:(if ((.path|ascii_downcase)|contains($h)) then 0 else 1 end),
+                   multi:(if is_part then (if is_first then 1 else 2 end) else 0 end)}
+              ] | sort_by([.hit, .multi, .size]) | .[0].path' tree.json)
           fi
           if [ -z "$TARGET" ] || [ "$TARGET" = "null" ]; then echo "NO_FILE"; exit 1; fi
           echo "target=$TARGET"
@@ -58,7 +61,21 @@ jobs:
           TARGET: ${{ steps.resolve.outputs.target }}
         run: |
           set -e
-          curl -sL --retry 8 --retry-all-errors -o model.gguf "https://huggingface.co/$HF_REPO/resolve/main/$TARGET?download=true"
+          if echo "$TARGET" | grep -qE '\-of-[0-9]+\.gguf$'; then
+            N=$(echo "$TARGET" | sed -E 's/.*-of-([0-9]+)\.gguf$/\1/')
+            BASE=$(echo "$TARGET" | sed -E 's/-0+[0-9]+-of-[0-9]+\.gguf$//')
+            W=${#N}
+            for i in $(seq 1 "$N"); do
+              PART=$(printf "%0${W}d" "$i")
+              PTH="${BASE}-${PART}-of-${N}.gguf"
+              echo "downloading $PTH"
+              curl -sL --retry 8 --retry-all-errors -o "part.gguf" "https://huggingface.co/$HF_REPO/resolve/main/$PTH?download=true"
+              cat "part.gguf" >> model.gguf
+              rm -f "part.gguf"
+            done
+          else
+            curl -sL --retry 8 --retry-all-errors -o model.gguf "https://huggingface.co/$HF_REPO/resolve/main/$TARGET?download=true"
+          fi
           ls -la model.gguf
           head -c 4 model.gguf | grep -q GGUF && echo "valid" || (echo "NOT GGUF"; exit 1)
 
