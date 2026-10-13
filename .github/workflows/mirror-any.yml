@@ -1,0 +1,80 @@
+name: mirror-any
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "תג המהדורה (אנגלית-אסקי, בלי רווחים)"
+        required: true
+      hf_repo:
+        description: "מאגר HuggingFace, למשל Qwen/Qwen2.5-3B-Instruct-GGUF"
+        required: true
+      file:
+        description: "נתיב קובץ מדויק (אופציונלי; ריק = בחירה אוטומטית)"
+        required: false
+        default: ""
+      hint:
+        description: "רמז לבחירת קובץ אוטומטית"
+        required: false
+        default: "q4_k_m"
+      title:
+        description: "כותרת המהדורה"
+        required: false
+        default: "model"
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve file
+        id: resolve
+        env:
+          HF_REPO: ${{ inputs.hf_repo }}
+          FILE: ${{ inputs.file }}
+          HINT: ${{ inputs.hint }}
+        run: |
+          set -e
+          if [ -n "$FILE" ]; then
+            TARGET="$FILE"
+          else
+            curl -s -o tree.json "https://huggingface.co/api/models/$HF_REPO/tree/main?recursive=true&expand=true"
+            TARGET=$(jq -r --arg h "$(echo "$HINT" | tr 'A-Z' 'a-z')" '
+              [ .[] | select(.type=="file")
+                | select((.path|test("(?i)\\.gguf$")))
+                | select((.path|test("(?i)mmproj|mtp|vision|encoder|projector|tokenizer|imatrix|audio|aux"))|not)
+                | {path:.path,size:(.size//0),hit:(if ((.path|ascii_downcase)|contains($h)) then 0 else 1 end)}
+              ] | sort_by([.hit, .size]) | .[0].path' tree.json)
+          fi
+          if [ -z "$TARGET" ] || [ "$TARGET" = "null" ]; then echo "NO_FILE"; exit 1; fi
+          echo "target=$TARGET"
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+
+      - name: Download GGUF
+        env:
+          HF_REPO: ${{ inputs.hf_repo }}
+          TARGET: ${{ steps.resolve.outputs.target }}
+        run: |
+          set -e
+          curl -sL --retry 8 --retry-all-errors -o model.gguf "https://huggingface.co/$HF_REPO/resolve/main/$TARGET?download=true"
+          ls -la model.gguf
+          head -c 4 model.gguf | grep -q GGUF && echo "valid" || (echo "NOT GGUF"; exit 1)
+
+      - name: Split
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
+          mkdir -p parts
+          7z a -bso0 -bsp0 -v24m -mx=1 "parts/model.7z" model.gguf
+          ls -la parts
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes "Auto-mirror (Netfree bypass)" 2>/dev/null || true
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" parts/* --clobber
+          echo "DONE https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
