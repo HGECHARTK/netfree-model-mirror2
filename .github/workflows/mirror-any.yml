@@ -48,7 +48,7 @@ jobs:
                 | select((.path|test("(?i)\\.gguf$")))
                 | select((.path|test("(?i)mmproj|mtp|vision|encoder|projector|tokenizer|imatrix|audio|aux"))|not)
                 | {path:.path,size:(.size//0),hit:(if ((.path|ascii_downcase)|contains($h)) then 0 else 1 end),
-                   multi:(if is_part then (if is_first then 1 else 2 end) else 0 end)}
+                   multi:(if (.path|is_part) then (if (.path|is_first) then 1 else 2 end) else 0 end)}
               ] | sort_by([.hit, .multi, .size]) | .[0].path' tree.json)
           fi
           if [ -z "$TARGET" ] || [ "$TARGET" = "null" ]; then echo "NO_FILE"; exit 1; fi
